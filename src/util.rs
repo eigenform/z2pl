@@ -1,8 +1,8 @@
 use std::collections::{ VecDeque };
 
 pub struct Queue<T: Sized + Clone + Copy> {
-    data: VecDeque<T>,
-    cap: usize,
+    pub data: VecDeque<T>,
+    pub cap: usize,
 }
 impl <T: Sized + Clone + Copy> Queue<T> {
     pub fn new(cap: usize) -> Self {

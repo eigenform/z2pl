@@ -96,40 +96,47 @@ pub struct IBQEntry {
     pub data: [u8; 16]
 }
 
-pub struct DecodedInst {
+#[derive(Copy, Clone)]
+pub struct Uop {
+    pub addr: usize,
     pub inst: Instruction,
-    pub bytes: Vec<u8>,
 }
 
 fn main() {
     let mut f = File::open("./code/test.bin").expect("no file");
     unsafe { f.read(&mut RAM).unwrap(); }
 
-    let mut pc: usize = 0;
+    // Fetch target added to the queue at the start of each cycle
+    let mut npc: usize = 0;
+
+    // Fetch target queue (unknown size)
     let mut ftq: Queue<usize> = Queue::new(8);
+    // Instruction byte queue
     let mut ibq: Queue<IBQEntry> = Queue::new(20);
+
+    // The size of this structure is apparently unknown
+    let mut opq: Queue<Uop> = Queue::new(100);
+
     let mut fetch_stall = false;
     let mut decode_stall = false;
 
+    // Rolling offset into the decoder pick window
     let mut pick_off = 0;
 
     while clk() < 4 {
         println!("============ cycle {} ====================", clk());
-        ftq.push(pc).unwrap();
+        ftq.push(npc).unwrap();
+
+        // Fetch 
+        // ------------------------
 
         fetch_stall = ftq.is_empty() || ibq.is_full();
-
         if !fetch_stall {
             // Get a half-line (32B) from the L1 cache per-cycle
             let addr = ftq.pop().unwrap();
             println!("FTQ pop {:08x}", addr);
             let data = cache_read(addr);
             println!("L1 cache read {:08x}", addr);
-            //let line = HalfLine { addr, data };
-
-            // Push the next half-line onto the fetch target queue
-            //ftq.push(addr + 0x20).unwrap();
-            //println!("FTQ push {:08x}", addr + 0x20);
 
             // Push onto the instruction byte queue
             ibq.push(IBQEntry { 
@@ -144,61 +151,84 @@ fn main() {
             println!("[!] fetch stall");
         }
 
-        decode_stall = ibq.len() < 2;
+        // Decode
+        // ------------------------
 
+        decode_stall = ibq.len() < 2 || opq.is_full();
         if !decode_stall {
-            // Use the oldest two entries for the pick window
+            // Rolling cursor into the pick window
+            let mut pick_cursor = pick_off;
+            // Pick window for this cycle
+            let mut pick = [0u8; 32];
+            // Output for this cycle
+            let mut slots = [None; 4];
+
+            // Use the oldest two entries in the IBQ for the pick window
             let bot = ibq.peek(0).unwrap();
             let top = ibq.peek(1).unwrap();
-            let mut pick = [0u8; 32];
             pick[0x00..0x10].copy_from_slice(&bot.data);
             pick[0x10..].copy_from_slice(&top.data);
-            println!("Pick window (pick_off={:02x}):", pick_off);
-            println!(" {:08x}: {:02x?}", bot.addr, bot.data);
-            println!(" {:08x}: {:02x?}", top.addr, top.data);
 
+            // Setting up iced-x86
             let mut inst = Instruction::default();
             let mut decoder = Decoder::with_ip(
                 64, &pick[pick_off..], 0, DecoderOptions::NONE
             );
-            let mut slots = Vec::new();
-            let mut pick_cursor = pick_off;
 
+            println!("Pick window (pick_off={:02x}):", pick_off);
+            println!(" {:08x}: {:02x?}", bot.addr, bot.data);
+            println!(" {:08x}: {:02x?}", top.addr, top.data);
+
+            // Fill up to four slots during this cycle
             for idx in 0..4 {
                 decoder.decode_out(&mut inst);
-                if idx != 0 && inst.len() > 8 {
-                    break;
-                }
-                if inst.is_invalid() {
-                    break;
-                }
+                if idx != 0 && inst.len() > 8 { break; }
+                if inst.is_invalid() { break; }
                 let bytes = &pick[pick_cursor..pick_cursor + inst.len()];
                 pick_cursor += inst.len();
-                slots.push((inst, bytes));
+                slots[idx] = Some((inst, bytes, pick_cursor));
+            }
+            println!("decode stopped at pick_cursor={:02x}", pick_cursor);
+
+            // Push ops to the micro-op queue
+            for idx in 0..4 {
+                if let Some((inst, bytes, cur)) = slots[idx] {
+                    let op = Uop {
+                        addr: bot.addr + pick_off + cur,
+                        inst: inst,
+                    };
+                    opq.push(op).unwrap();
+                    println!("slot {}: pick_cursor={:02x} {:?} {:02x?}", 
+                         idx, inst.ip(), inst.code(), bytes);
+                } else {
+                    println!("slot {}: empty", idx);
+                }
             }
 
-            for (i, s) in slots.iter().enumerate() {
-                println!("slot {}: pick_cursor={:02x} {:?} {:02x?}", 
-                         i, s.0.ip(), s.0.code(), s.1);
-            }
-            println!("stopped at pick_cursor={:02x}", pick_cursor);
-
+            // Adjust the window for the next cycle
             match pick_cursor {
+                // We haven't finished decoding head IBQ entry
                 0x00..=0x0f => {
                     pick_off = pick_cursor;
                 },
+                // Pop the head IBQ entry and roll the cursor over
                 0x10..=0x1f => {
                     pick_off = pick_cursor - 0x10;
                     ibq.pop();
                 },
                 _ => unreachable!(),
             }
+
         } else {
             println!("[!] decode stall");
         }
 
+        for (i, e) in opq.data.iter().enumerate() {
+            println!("{:02}: {:?}", i, e.inst.code());
+        }
 
-        pc += 0x20;
+
+        npc += 0x20;
 
         step();
     }
