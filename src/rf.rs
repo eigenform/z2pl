@@ -1,12 +1,7 @@
 
 
-pub enum GPR {
-    Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rsp, Rbp,
-    R8, R9, R10, R11, R12, R13, R14, R15,
-}
 
-
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct PRFEntry {
     pub free: bool,
     pub data: usize,
@@ -17,6 +12,8 @@ impl PRFEntry {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub struct Prn(pub usize);
 pub struct PhysicalRegisterFile {
     pub data: [PRFEntry; 180],
 }
@@ -29,6 +26,20 @@ impl PhysicalRegisterFile {
     pub fn can_alloc(&self) -> bool {
         self.data.iter().find(|&e| e.free).is_some()
     }
+    pub fn find(&mut self) -> Option<Prn> {
+        if let Some((i, e)) = self.data.iter_mut().enumerate()
+            .find(|(i, e)| e.free) 
+        {
+            Some(Prn(i))
+        } else { None }
+    }
+    pub fn alloc(&mut self, prn: Prn) -> Result<(), ()> {
+        assert!(self.data[prn.0].free == true);
+        self.data[prn.0].free = false;
+        Ok(())
+
+    }
+
 }
 impl std::ops::Index<usize> for PhysicalRegisterFile {
     type Output = PRFEntry;

@@ -1,6 +1,5 @@
 .intel_syntax noprefix
 
-
 _start:
 	mov rax, 0
 	mov rbx, 0

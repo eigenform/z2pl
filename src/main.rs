@@ -4,9 +4,14 @@
 #![allow(unused_imports)]
 #![allow(unused_assignments)]
 
+
 pub mod util;
 pub mod front;
-pub mod back;
+
+pub mod dispatch;
+pub mod schedule;
+pub mod retire;
+
 pub mod mem;
 pub mod rf;
 pub mod op;
@@ -18,7 +23,9 @@ use std::sync::{ Arc, RwLock };
 
 use crate::util::*;
 use crate::front::*;
-use crate::back::*;
+use crate::dispatch::*;
+use crate::schedule::*;
+use crate::retire::*;
 use crate::mem::*;
 use crate::rf::*;
 use crate::op::*;
@@ -47,9 +54,10 @@ fn main() {
     while clk() < 6 {
         println!("============ cycle {} ====================", clk());
 
+        println!("FTQ push {:08x}", npc);
         ftq.push(npc).unwrap();
 
-        // Fetch unit
+        // Instruction fetch
         fetch_stall = ftq.is_empty() || ibq.is_full();
         if !fetch_stall {
             ifu.cycle(&mut ftq, &mut ibq);
@@ -57,7 +65,7 @@ fn main() {
             println!("[!] fetch stall");
         }
 
-        // Decode unit
+        // Instruction decode
         decode_stall = ibq.len() < 2 || opq.is_full();
         if !decode_stall {
             dec_out = idu.cycle(&mut ibq);
@@ -66,7 +74,7 @@ fn main() {
             println!("[!] decode stall");
         }
 
-        // Convert instructions into "macro-ops"
+        // Convert instructions into "macro-ops" and add to the op queue
         for e in dec_out.iter() {
             if let Some(inst) = e {
                 let mop = get_macro_ops(&inst);
@@ -78,20 +86,41 @@ fn main() {
             }
         }
 
-        for e in opq.data.iter() { println!("{:?}", e); }
+        for e in opq.data.iter() { println!("{:x?}", e); }
 
-        dispatch_stall = opq.is_empty() || !prf.can_alloc() || rob.is_full();
-        if !dispatch_stall {
-            // The dispatch window is 6 micro-ops per cycle
-            for _ in 0..6 {
-                if let Ok(op) = opq.peek(0) {
-                    //if !prf.can_alloc();
-                } 
-                // The op queue has been fully drained
-                else { break; }
+        // The dispatch window is 6 macro-ops per cycle
+        'dispatch: for idx in 0..6 {
+            println!("Dispatch window slot {}", idx);
+
+            if rob.is_full() {
+                println!("[!] stalled for ROB allocation");
+                break 'dispatch;
             }
-        } else {
-            println!("[!] dispatch stall");
+
+            if let Ok(e) = opq.peek(0) {
+
+                // Find a free physical register if necessary
+                let dst = if let Some(rd) = e.op.reg_result() {
+                    if let Some(prn) = prf.find() {
+                        Some((rd, prn))
+                    } else {
+                        println!("[!] stalled for PRF allocation");
+                        break 'dispatch;
+                    }
+                } else { None };
+
+                let robent = ROBEntry {
+                    addr: e.addr,
+                    mop: e.op, uop: Uop::Nop,
+                    sched: SchedulerId::None,
+                    dst, complete: false
+                };
+                println!("{:?}", robent);
+
+            } else {
+                println!("[!] Op queue exhausted");
+                break 'dispatch;
+            }
         }
 
         npc += 0x20;

@@ -2,6 +2,7 @@
 use crate::util::*;
 use crate::mem::*;
 use crate::op::*;
+use crate::rf::*;
 use iced_x86::{
     Decoder, DecoderOptions, Formatter, Instruction, IntelFormatter,
     ConditionCode, InstructionInfoFactory, OpKind, RflagsBits,
@@ -96,85 +97,6 @@ impl DecodeUnit {
         }
         res
     }
-}
-
-
-#[derive(Debug, Copy, Clone)]
-pub enum MacroOp {
-    AddReg(Register, Register),
-    MovImm(Register, i64),
-    MovReg(Register, Register),
-    JmpImm(usize),
-    StoreReg(Register, Register, u64, Register, MemorySize),
-    Nop,
-    Ud2,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct OPQEntry {
-    pub addr: usize,
-    pub op: MacroOp,
-}
-
-
-pub fn get_macro_ops(inst: &DecodedInst) -> MacroOp {
-    println!("{:08x}: {:?} {:02x?}", inst.addr, 
-        inst.inst.code(), &inst.bytes[..inst.inst.len()]);
-
-    //for op in inst.inst.op_kinds() { println!("{:?}", op); }
-
-    use iced_x86::Code::*;
-    let mut fac = InstructionInfoFactory::new();
-    let info = fac.info(&inst.inst);
-
-    match inst.inst.code() {
-        Ud2 => MacroOp::Ud2,
-        Nop_rm16 | Nopw => MacroOp::Nop,
-        Mov_rm64_imm32 => {
-            match inst.inst.op0_kind() {
-                OpKind::Register => {
-                    let rd  = inst.inst.op0_register();
-                    let imm = inst.inst.immediate32to64();
-                    MacroOp::MovImm(rd, imm)
-                }
-                _ => unimplemented!(),
-            }
-        },
-        Mov_rm64_r64 => {
-            let rs = inst.inst.op1_register();
-            match inst.inst.op0_kind() {
-                OpKind::Register => {
-                    let rd  = inst.inst.op0_register();
-                    MacroOp::MovReg(rd, rs)
-                },
-                OpKind::Memory => {
-                    let rbase = inst.inst.memory_base();
-                    let ridx  = inst.inst.memory_index();
-                    let disp  = inst.inst.memory_displacement64();
-                    let sz    = inst.inst.memory_size();
-                    MacroOp::StoreReg(rbase, ridx, disp, rs, sz)
-                },
-                _ => unimplemented!(),
-            }
-        },
-        Add_rm64_r64 => {
-            let rs = inst.inst.op1_register();
-            match inst.inst.op0_kind() {
-                OpKind::Register => {
-                    let rd = inst.inst.op0_register();
-                    MacroOp::AddReg(rd, rs)
-                },
-                _ => unimplemented!(),
-            }
-        },
-        Jmp_rel8_64 => {
-            let tgt = inst.inst.near_branch64();
-            println!("tgt={:x}", tgt);
-            MacroOp::JmpImm(tgt as usize)
-        }
-        _ => panic!("Unknown macro-op for {:?}", inst.inst.code()),
-    }
-
 }
 
 
