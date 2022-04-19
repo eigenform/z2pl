@@ -42,15 +42,26 @@ impl <T: Sized + Clone + Copy> Queue<T> {
     pub fn pop(&mut self) -> Result<T, ()> {
         if let Some(res) = self.data.pop_front() { Ok(res) } else { Err(()) }
     }
-    pub fn popn(&mut self, num: usize) -> Result<Vec<T>, ()> {
+    pub fn popn_exact(&mut self, num: usize) -> Result<Vec<T>, ()> {
         if self.is_empty() || self.len() < num {
             Err(())
         } else {
-            let mut res = vec![None; num];
-            for i in 0..(num-1) {
-                res[i] = Some(self.pop().unwrap());
+            let mut res = Vec::new();
+            for _ in 0..num {
+                res.push(self.pop().unwrap());
             }
-            Ok(res.iter().map(|e| e.unwrap()).collect())
+            Ok(res)
+        }
+    }
+    pub fn popn_upto(&mut self, num: usize) -> Result<Vec<T>, ()> {
+        if self.is_empty() {
+            Err(())
+        } else {
+            let mut res = Vec::new();
+            for _ in 0..num {
+                if let Ok(e) = self.pop() { res.push(e) } else { break; }
+            }
+            Ok(res)
         }
     }
 }
