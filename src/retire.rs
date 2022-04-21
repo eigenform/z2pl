@@ -6,17 +6,36 @@ use iced_x86::{
 
 use crate::op::*;
 use crate::rf::*;
-use crate::schedule::*;
+use crate::dispatch::*;
+use crate::util::*;
 
-
+/// An entry in the reorder buffer.
 #[derive(Clone, Copy, Debug)]
 pub struct ROBEntry {
-    pub addr: usize,
     pub mop: MacroOp,
     pub uop: Uop,
-    pub dst: Option<(Register, Prn)>,
-    pub sched: SchedulerId,
     pub complete: bool,
 }
+impl ROBEntry {
+    pub fn new(mop: MacroOp, uop: Uop) -> Self {
+        Self { mop, uop, complete: false }
+    }
+}
 
+pub struct ReorderBuffer {
+    pub tag: usize,
+    pub data: Queue<ROBEntry>,
+}
+impl ReorderBuffer {
+    pub fn new() -> Self {
+        Self {
+            tag: 0,
+            data: Queue::new(224),
+        }
+    }
+    pub fn num_free(&self) -> usize { self.data.cap - self.data.len() }
 
+    pub fn push(&mut self, e: ROBEntry) -> Result<usize, ()> {
+        self.data.push(e)
+    }
+}

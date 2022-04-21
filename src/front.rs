@@ -13,38 +13,47 @@ use iced_x86::{
 /// A 64-byte cache line.
 #[derive(Copy, Clone)]
 pub struct CacheLine { pub addr: usize, pub data: [u8; 64] }
+
 /// A 32-byte cache half-line.
 #[derive(Copy, Clone)]
 pub struct HalfLine { pub addr: usize, pub data: [u8; 32] }
+
 /// Entry in the instruction byte queue.
 #[derive(Copy, Clone)]
 pub struct IBQEntry { pub addr: usize, pub data: [u8; 16] }
 
-/// Instruction fetch logic.
+/// Abstract representation of the instruction fetch unit.
 pub struct FetchUnit;
 impl FetchUnit {
     pub fn cycle(&mut self, ftq: &mut Queue<usize>, ibq: &mut Queue<IBQEntry>) {
         let addr = ftq.pop().unwrap();
         let data = cache_read(addr);
+        println!("[IFU] Read 32b at {:08x}", addr);
         ibq.push(IBQEntry { 
             addr: addr + 0x00, data: data[0x00..0x10].try_into().unwrap() 
         }).unwrap();
         ibq.push(IBQEntry { 
             addr: addr + 0x10, data: data[0x10..].try_into().unwrap() 
         }).unwrap();
+        println!("[IBQ] Pushed entry {:08x}", addr + 0x00);
+        println!("[IBQ] Pushed entry {:08x}", addr + 0x10);
     }
 }
 
+/// Representing a decoded instruction.
 #[derive(Clone, Copy)]
 pub struct DecodedInst {
-    pub inst: Instruction,
-    pub bytes: [u8; 0x10],
+    /// The address of this instruction
     pub addr: usize,
+    /// Bytes (up to 16) associated with this instruction
+    pub bytes: [u8; 0x10],
+    /// x86 instruction metadata
+    pub inst: Instruction,
 }
 
-/// Instruction decode logic.
+/// Abstract representation of the instruction decode unit.
 pub struct DecodeUnit {
-    /// Rolling cursor into the pick window
+    /// Rolling cursor (register) into the pick window.
     pub pick_offset: usize,
 }
 impl DecodeUnit {
@@ -58,6 +67,7 @@ impl DecodeUnit {
         let pick_addr  = bot.addr;
         pick[0x00..0x10].copy_from_slice(&bot.data);
         pick[0x10..].copy_from_slice(&top.data);
+        println!("[IDU] Decode started at pick window offset {:02x}", cursor);
 
         let mut res: [Option<DecodedInst>; 4] = [None; 4];
         let mut inst = Instruction::default();
@@ -86,11 +96,14 @@ impl DecodeUnit {
             // Finished first entry: pop first entry and roll over cursor
             0x10..=0x1f => {
                 self.pick_offset = cursor - 0x10;
+                println!("[IDU] Decode popped IBQ entry {:08x}", bot.addr);
                 ibq.pop().unwrap();
             },
             // Exhausted the whole window: reset cursor and pop both entries
             0x20 => {
                 self.pick_offset = 0;
+                println!("[IDU] Decode popped IBQ entry {:08x}", bot.addr);
+                println!("[IDU] Decode popped IBQ entry {:08x}", top.addr);
                 ibq.popn_exact(2).unwrap();
             }
             _ => unreachable!(),
