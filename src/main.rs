@@ -13,7 +13,9 @@ pub mod retire;
 
 pub mod mem;
 pub mod rf;
+pub mod exec;
 pub mod op;
+
 
 use std::fs::File;
 use std::io::Read;
@@ -27,48 +29,65 @@ use crate::retire::*;
 use crate::mem::*;
 use crate::rf::*;
 use crate::op::*;
+use crate::exec::*;
 
 fn main() {
     let mut f = File::open("./code/test.bin").expect("no file");
     unsafe { f.read(&mut RAM).unwrap(); }
 
-    let mut npc: usize = 0;
-    let mut fetch_stall    = false;
-    let mut decode_stall   = false;
-    let mut dispatch_stall = false;
+    let mut npc: usize     = 0;
 
+
+    // Instruction fetch
+    let mut pred_stall  = false;
+    let mut fetch_stall = false;
     let mut ftq: Queue<usize> = Queue::new(8);
     let mut ifu = FetchUnit;
 
+    // Instruction decode
+    let mut decode_stall = false;
     let mut ibq: Queue<IBQEntry> = Queue::new(20);
     let mut idu = DecodeUnit { pick_offset: 0 };
     let mut dec_out: [Option<DecodedInst>; 4] = [None; 4];
 
+    // In-order dispatch
+    let mut dispatch_stall = false;
     let mut opq: Queue<OPQEntry> = Queue::new(32);
-    let mut dis = DispatchUnit::new();
+    let mut dispatch = DispatchUnit;
 
+    // Dynamic scheduling/out-of-order execution
+    let mut issue_stall = false;
     let mut alu_sched = [ALUScheduler::new(); 4];
     let mut agu_sched = AGUScheduler::new();
-
+    let mut rob = ReorderBuffer::new(224);
     let mut rat = RegisterAliasTable::new();
     let mut prf = PhysicalRegisterFile::new();
-    let mut rob = ReorderBuffer::new();
+    let mut alu = [ALU::new(); 4];
 
 
-    while clk() < 6 {
+    while clk() < 32 {
         println!("============ cycle {} ====================", clk());
 
         // Push some predicted fetch target address onto the FTQ.
         // When no prediction occurs, this is the next-sequential fetch
         // block address.
 
-        println!("[FTQ] Push {:08x} onto the FTQ", npc);
-        ftq.push(npc).unwrap();
+        pred_stall = ftq.is_full();
+        if !pred_stall {
+            println!("[FTQ] Push {:08x} onto the FTQ", npc);
+            ftq.push(npc).unwrap();
+        } else {
+            println!("[FTQ] NPC stall");
+        }
 
         // Consume an entry from the FTQ and read 32 bytes from the L1 cache
         // per cycle. Push the resulting bytes onto the IBQ.
+        //
+        // NOTE: Right now we assume that the fetch unit *always* pushes
+        // two entries onto the IBQ (otherwise, if there aren't two free
+        // entries in the IBQ, we stall the fetch unit).
 
-        fetch_stall = ftq.is_empty() || ibq.is_full();
+        fetch_stall = ftq.is_empty() || ibq.num_free() < 2;
         if !fetch_stall {
             ifu.cycle(&mut ftq, &mut ibq);
         } else {
@@ -77,166 +96,146 @@ fn main() {
 
         // Scan the oldest IBQ entries (a 32-byte pick window), decoding up
         // to four instructions.
-
+        //
+        // Convert decoded instructions into macro-ops and push them
+        // onto the micro-op queue
+ 
         decode_stall = ibq.len() < 2 || opq.is_full();
-        if !decode_stall {
-            dec_out = idu.cycle(&mut ibq);
+        dec_out = if !decode_stall {
+            idu.cycle(&mut ibq)
         } else {
-            dec_out = [None; 4];
             println!("[IDU] Decode stall");
-        }
+            [None; 4]
+        };
 
-        // Convert decoded instructions into "macro-ops" and add them to
-        // the macro-op queue.
-
-        for e in dec_out.iter() {
-            if let Some(inst) = e {
-                let mop = get_macro_ops(&inst);
-                let ent = OPQEntry {
-                    op: mop,
-                    addr: inst.addr,
-                };
-                opq.push(ent).unwrap();
-                //println!("[IDU] Pushed {:x?}", ent);
-            }
+        for inst in dec_out.iter().filter_map(|i| *i) {
+            opq.push(OPQEntry { 
+                op: get_macro_ops(&inst), 
+                addr: inst.addr 
+            }).unwrap();
         }
 
         // Dispatch up to 6 macro-ops per cycle from the op queue.
+        // For each macro-op, this entails (not necessarily in this order):
         //
-        // NOTE: I think dispatch is technically out-of-order, although right
-        // now, this is technically preserving the program order.
+        // - Converting into one or more micro-ops
+        // - Renaming operands into physical registers
+        // - Allocating physical registers for results
+        // - Allocating a reorder buffer entry
+        // - Allocating a scheduler entry
+        //
+        // After this point, micro-ops are issued, executed, and completed
+        // out-of-order.
 
-        'dispatch: for idx in 0..6 {
-            // Get a copy of the next candidate for dispatch
-            let (mop_addr, mop) = if let Ok(e) = opq.peek(0) { (e.addr, e.op) } 
-            else { 
-                println!("[DIS] Stalled for empty op queue");
-                break 'dispatch;
-            };
+        dispatch.cycle(
+            &mut opq, 
+            &mut alu_sched, &mut agu_sched, 
+            &mut prf, &mut rob, &mut rat
+        );
+        println!("      --------------------------------------");
 
-            // Decompose a macro-op into one or two micro-ops
-            let mut uops = Uop::from_mop(mop, mop_addr);
-            println!("[DIS] Decomposed macro-op {:x?}", mop);
-            for u in uops.iter() {
-                println!("[DIS]    {:?}", u.kind);
+        // Iterate over all busy ALUs and update the status of any in-flight
+        // operations.
+
+        for (idx, tgt_alu) in alu.iter_mut().enumerate() {
+            println!("[ALU] ALU{} status:", idx);
+            let res = tgt_alu.cycle(&mut rob, &mut prf);
+            match res {
+                Ok(comp) => {
+                    println!("[ALU]   {:08x}: {:?}, rob_idx={} complete", 
+                        comp.uop.addr, comp.uop.kind, comp.rob_idx);
+                    rob.get_mut(comp.rob_idx).unwrap().complete = true;
+                },
+                Err(ALUErr::Empty) => {
+                    println!("[ALU]   Empty");
+                },
+                Err(ALUErr::PendingCompletion) => {
+                    let op = tgt_alu.op.unwrap();
+                    println!("[ALU]   {:08x}: {:?}", op.uop.addr, op.uop.kind);
+                },
             }
+        }
 
-            // Get the number of required physical registers
-            let num_prn_alloc = uops.iter().map(|u| u.preg_allocs()).sum();
-            let num_prn_free = prf.free_regs();
-            println!("[PRA] PRF has {} free physical registers, need {}", 
-                     num_prn_free, num_prn_alloc);
+        println!("      --------------------------------------");
 
-            // Get the number of required scheduler entries
-            let num_alu_alloc = uops.iter().filter(|&u| u.is_alu()).count();
-            let num_agu_alloc = uops.iter().filter(|&u| u.is_agu()).count();
-            let num_alu_free: usize = alu_sched.iter()
-                .map(|s| s.num_free()).sum();
-            let num_agu_free = agu_sched.num_free();
-            println!("[SCH] ALU schedulers have {} total free slots, need {}", 
-                     num_alu_free, num_alu_alloc);
-            println!("[SCH] AGU scheduler has {} free slots, need {}", 
-                     num_agu_free, num_agu_alloc);
 
-            // Get the number of required ROB entries
-            let num_rob_alloc = uops.len();
-            let num_rob_free  = rob.num_free();
-            println!("[SCH] ROB has {} free slots, need {}",
-                     num_rob_free, num_rob_alloc);
 
-            // Determine if all resources are available for allocation.
-            // If we don't have the resources, stall dispatch
-            let prn_alloc_ok = num_prn_free >= num_prn_alloc;
-            let alu_alloc_ok = num_alu_free >= num_alu_alloc;
-            let agu_alloc_ok = num_agu_free >= num_agu_alloc;
-            let rob_alloc_ok = num_rob_free >= num_rob_alloc;
-            if !prn_alloc_ok {
-                println!("[PRA] Stalled for physical register allocation");
-                break 'dispatch;
-            }
-            if !alu_alloc_ok {
-                println!("[SCH] Stalled for ALU scheduler allocation");
-                break 'dispatch;
-            }
-            if !agu_alloc_ok {
-                println!("[SCH] Stalled for AGU scheduler allocation");
-                break 'dispatch;
-            }
-            if !rob_alloc_ok {
-                println!("[SCH] Stalled for ROB allocation");
-                break 'dispatch;
-            }
+        // Iterate over all ALU schedulers and attempt to fire any pending
+        // reservations that are ready-for-issue.
+        //
+        // Each ALQ can only issue 1 micro-op per cycle.
 
-            for uop in uops.iter_mut() {
-                // Allocate architectural destination register.
-                for eff in uop.eff.iter_mut() {
-                    if let Effect::RegWrite(rd, prn) = eff {
-                        if prn == &Prn::alloc() {
-                            let nprn = prf.alloc().unwrap();
-                            println!("[PRA] Allocated {:?} for {:?}", nprn, rd);
-                            rat.bind(rd.clone(), nprn);
-                            *eff = Effect::RegWrite(rd.clone(), nprn);
-                        }
-                    }
-                }
+        let mut free_alus = alu.iter_mut().enumerate()
+            .filter(|(idx, s)| s.op.is_none());
+        for (idx, alq) in alu_sched.iter_mut().enumerate() {
+            println!("[ISS] Checking ALQ{}", idx);
+            println!("[ISS]   {} pending reservation[s]", alq.num_pending());
 
-                // Rename architectural source registers
-                for arg in uop.arg.iter_mut() {
-                    if let Storage::Arn(r) = arg {
-                        let p = rat.resolve(r);
-                        println!("[RAT] Renamed {:?} to {:?}", r, p);
-                        *arg = Storage::Prn(p);
-                    }
-                }
+            // Try to get a mutable reference to an unoccupied ALU.
+            // Otherwise, if all ALUs are currently busy, no more micro-ops
+            // can be issued during this cycle.
+            if let Some((alu_idx, tgt_alu)) = free_alus.next() {
 
-                // Send this micro-op to a scheduler.
-                // NOTE: This doesn't make any "real" attempt to actually 
-                // balance the ALU scheduling.
-                match uop.kind {
-                    UopKind::Alu(_) => {
-                        let r = ALUReservation { mop, uop: *uop };
-
-                        // Naively prioritize the emptiest queue
-                        let (i, mut tgt) = alu_sched.iter_mut()
-                            .enumerate().max_by(|(i,x),(j,y)| { 
-                                x.num_free().cmp(&y.num_free()) 
-                        }).unwrap();
-
-                        tgt.alloc(r).unwrap();
-                        println!("[DIS] Sent to ALSQ{}", i);
+                // Try to find a reservation which is ready-for-issue.
+                //
+                // If there are none, move on to the next ALQ.
+                // Otherwise, *consume* the reservation from the ALQ and
+                // pass it onto the appropriate ALU.
+                match alq.take_ready() {
+                    None => {
+                        println!("[ISS]   No ready-to-issue reservations");
+                        continue;
                     },
-                    UopKind::Agu(_) => {
-                        let r = AGUReservation { mop, uop: *uop };
-                        agu_sched.alloc(r).unwrap();
-                        println!("[DIS] Sent to AGSQ");
+                    Some(iss_res) => {
+                        println!("[ISS]   ALU{} issued {:08x}: {:?}", 
+                                 alu_idx, iss_res.uop.addr, iss_res.uop.kind);
+                        tgt_alu.do_issue(clk(), iss_res);
                     },
-                    _ => unreachable!(),
                 }
-
-                // Allocate a reorder buffer entry for this micro-op
-                let rob_ent = ROBEntry::new(mop, *uop);
-                rob.push(rob_ent).unwrap();
-
+            } else {
+                println!("[ISS]   No free ALUs to consume a reservation");
+                println!("[ISS]   Issue stalled for ALU availability");
+                break;
             }
-            // Pop this macro-op from the queue
-            opq.pop().unwrap();
+        }
+        println!("      --------------------------------------");
 
+        // Retire and commit up to 8 micro-ops per cycle.
 
+        println!("[RCU] Reorder buffer status:");
+        println!("[RCU]   In-flight:    {}", rob.num_used());
+        println!("[RCU]   Free entries: {}", rob.num_free());
+        println!("[RCU]   Retire ptr:   {}", rob.retire_ptr);
+        println!("[RCU]   Dispatch ptr: {}", rob.dispatch_ptr);
+
+        for i in 0..8 {
+            match rob.pop() {
+                Ok((idx, ent)) => {
+                    if ent.uop.eff != [Effect::None, Effect::None] {
+                        unimplemented!("effects unimplemented");
+                    }
+                    println!("[RCU] Retired entry {} ({}/8): {:08x} {:?}",
+                             idx, i, ent.uop.addr, ent.uop.kind);
+                },
+                Err(ROBErr::Incomplete) => {
+                    let front = rob.get_front().unwrap();
+                    println!("[RCU] Commit stalled for {:08x} {:?}",
+                             front.uop.addr, front.uop.kind);
+                    break;
+                }
+                Err(ROBErr::Empty) => {
+                    println!("[RCU] Reorder buffer is empty");
+                    break;
+                },
+                Err(e) => unreachable!("{:?}", e),
+            }
         }
 
         npc += 0x20;
-
         step();
     }
 
-
 }
-
-
-
-
-
-
 
 
 

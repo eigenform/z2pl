@@ -23,20 +23,24 @@ pub struct HalfLine { pub addr: usize, pub data: [u8; 32] }
 pub struct IBQEntry { pub addr: usize, pub data: [u8; 16] }
 
 /// Abstract representation of the instruction fetch unit.
+///
+/// NOTE: For now, we're assuming that the fetch unit *always* pushes the
+/// whole window into the IBQ; otherwise, if there's no room for both entries,
+/// the fetch unit is stalled. 
 pub struct FetchUnit;
 impl FetchUnit {
     pub fn cycle(&mut self, ftq: &mut Queue<usize>, ibq: &mut Queue<IBQEntry>) {
         let addr = ftq.pop().unwrap();
         let data = cache_read(addr);
-        println!("[IFU] Read 32b at {:08x}", addr);
+        println!("[IFU] Fetching 32b at {:08x}", addr);
         ibq.push(IBQEntry { 
             addr: addr + 0x00, data: data[0x00..0x10].try_into().unwrap() 
         }).unwrap();
         ibq.push(IBQEntry { 
             addr: addr + 0x10, data: data[0x10..].try_into().unwrap() 
         }).unwrap();
-        println!("[IBQ] Pushed entry {:08x}", addr + 0x00);
-        println!("[IBQ] Pushed entry {:08x}", addr + 0x10);
+        println!("[IFU] Pushed IBQ entry {:08x}", addr + 0x00);
+        println!("[IFU] Pushed IBQ entry {:08x}", addr + 0x10);
     }
 }
 

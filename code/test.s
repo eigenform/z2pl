@@ -1,5 +1,10 @@
 .intel_syntax noprefix
 
+
+.rept 32
+	nop
+.endr
+
 _start:
 	mov rax, 0
 	mov rbx, 0
@@ -14,7 +19,10 @@ main:
 	mov rax, 0x10
 	mov rbx, 0x20
 	add rax, rbx
-	mov [rsp], rax
 	mov [rsp+0x10], rax
+	mov [rsp+0x20], rax
+	add rax, rbx
+	mov [rsp+0x30], rax
+	mov [rsp+0x40], rax
 	ud2
 .align 64

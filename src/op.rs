@@ -28,7 +28,7 @@ pub enum MacroOp {
 
 /// Convert a decoded instruction into one [or more] macro-ops.
 pub fn get_macro_ops(dec: &DecodedInst) -> MacroOp {
-    println!("[IDU] {:08x}: {:?} {:02x?}", dec.addr, 
+    println!("[IDU] Found macro-op {:08x}: {:?} {:02x?}", dec.addr, 
         dec.inst.code(), &dec.bytes[..dec.inst.len()]);
     let mut fac = InstructionInfoFactory::new();
     let info = fac.info(&dec.inst);
@@ -127,9 +127,11 @@ pub enum Effect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UopKind {
-    None, Illegal, Alu(ALUOp), Agu(AGUOp)
+    None, 
+    Illegal, 
+    Alu(ALUOp), 
+    Agu(AGUOp)
 }
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ALUOp { 
@@ -159,6 +161,30 @@ impl Uop {
             eff: [Effect::None; 2],
         }
     }
+
+    /// Return the execution latency associated with this micro-op
+    pub fn latency(&self) -> usize {
+        match self.kind {
+            UopKind::Alu(ALUOp::Nop) => 1,
+            _ => unimplemented!(),
+        }
+    }
+
+    /// Return an iterator over all physical register dependencies for this op.
+    pub fn iter_prn_deps(&self) -> impl Iterator<Item=Prn> + '_ {
+        self.arg.iter().filter_map(|a| 
+            if let Storage::Prn(p) = a { Some(*p) } else { None }
+        )
+    }
+    
+    /// Determine if a micro-op is ready to be issued.
+    pub fn fire(&self) -> bool {
+        match self.kind {
+            UopKind::Alu(ALUOp::Nop) => true,
+            _ => unimplemented!("Can't fire {:?}", self.kind),
+        }
+    }
+
     pub fn preg_allocs(&self) -> usize {
         self.eff.iter().filter(|e| 
             if let Effect::RegWrite(_, prn) = e {
@@ -179,6 +205,10 @@ impl Uop {
         let mut op1 = Uop::empty(addr);
         let mut op2 = Uop::empty(addr);
         match mop {
+            MacroOp::Ud2 => {
+                op1.kind = UopKind::Illegal;
+                res.push(op1);
+            },
             MacroOp::Nop => {
                 op1.kind = UopKind::Alu(ALUOp::Nop);
                 res.push(op1);
@@ -193,7 +223,11 @@ impl Uop {
             MacroOp::MovMR(base, idx, disp, sz, src) => {
                 op1.kind = UopKind::Agu(AGUOp::St(sz));
                 op1.arg[0] = Storage::Arn(base);
-                op1.arg[1] = Storage::Arn(idx);
+                op1.arg[1] = if idx == Register::None { 
+                    Storage::None
+                } else { 
+                    Storage::Arn(idx)
+                };
                 op1.arg[2] = Storage::Imm64(disp as i64);
                 op1.arg[3] = Storage::Arn(src);
                 res.push(op1);
