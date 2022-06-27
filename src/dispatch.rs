@@ -1,7 +1,9 @@
 
+use crate::front::*;
 use crate::rf::*;
 use crate::op::*;
 use crate::retire::*;
+use crate::issue::*;
 use crate::util::*;
 
 /// An entry in the macro-op queue.
@@ -30,7 +32,20 @@ pub enum DispatchErr {
 pub struct DispatchUnit;
 impl DispatchUnit {
 
+    /// Dispatch up to 6 macro-ops per cycle from the op queue.
+    /// For each macro-op, this entails (not necessarily in this order):
+    ///
+    /// - Converting into one or more micro-ops
+    /// - Renaming operands into physical registers
+    /// - Allocating physical registers for results
+    /// - Allocating a reorder buffer entry
+    /// - Allocating a scheduler entry
+    ///
+    /// After this point, micro-ops are issued, executed, and completed
+    /// out-of-order.
+
     pub fn cycle(&mut self, 
+        btb: &mut BranchTargetBuffer,
         opq: &mut Queue<OPQEntry>,
         alu_sched: &mut [ALUScheduler; 4],
         agu_sched: &mut AGUScheduler,
@@ -101,7 +116,7 @@ impl DispatchUnit {
                 // Resolve all architectural source registers
                 for arg in uop.arg.iter_mut() {
                     if let Storage::Arn(r) = arg {
-                        let p = rat.resolve(r);
+                        let p = rat.resolve(*r);
                         println!("[SCH] Resolved {:?} to {:?}", r, p);
                         *arg = Storage::Prn(p);
                     }
@@ -114,7 +129,7 @@ impl DispatchUnit {
                             let nprn = prf.alloc().unwrap();
                             println!("[SCH] Allocated {:?} for result {:?}", 
                                      nprn, rd);
-                            rat.bind(rd.clone(), nprn);
+                            //rat.bind(rd.clone(), nprn);
                             *eff = Effect::RegWrite(rd.clone(), nprn);
                         }
                     }
@@ -172,138 +187,5 @@ impl DispatchUnit {
         }
     }
 }
-
-/// Entry in an ALU scheduler.
-#[derive(Clone, Copy, Debug)]
-pub struct ALUReservation {
-    pub mop: MacroOp,
-    pub uop: Uop,
-    pub rob_idx: usize,
-}
-
-/// Entry in an AGU scheduler.
-#[derive(Clone, Copy, Debug)]
-pub struct AGUReservation {
-    pub mop: MacroOp,
-    pub uop: Uop,
-    pub rob_idx: usize,
-}
-
-/// Entry in a scheduler.
-#[derive(Clone, Copy, Debug)]
-pub struct Reservation {
-    pub mop: MacroOp,
-    pub uop: Uop,
-    pub rob_idx: usize,
-}
-
-// NOTE: Probably get rid of this
-pub trait Scheduler {
-    fn can_alloc(&self) -> bool;
-    fn can_allocn(&self, n: usize) -> bool;
-    fn num_free(&self) -> usize;
-    fn num_pending(&self) -> usize;
-    fn alloc(&mut self, e: Reservation) -> Result<(), ()>;
-}
-
-/// An ALU scheduler/reservation station.
-#[derive(Clone, Copy, Debug)]
-pub struct ALUScheduler {
-    pub data: [Option<Reservation>; 16],
-}
-impl ALUScheduler {
-    pub fn new() -> Self {
-        Self { data: [None; 16] }
-    }
-}
-impl Scheduler for ALUScheduler {
-    fn can_alloc(&self) -> bool {
-        self.data.iter().any(|&e| e.is_none()) 
-    }
-    fn can_allocn(&self, n: usize) -> bool {
-        self.data.iter().filter(|&e| e.is_none()).count() >= n
-    }
-    fn num_free(&self) -> usize {
-        self.data.iter().filter(|&e| e.is_none()).count()
-    }
-    fn num_pending(&self) -> usize {
-        self.data.iter().filter(|&e| e.is_some()).count()
-    }
-    fn alloc(&mut self, new: Reservation) -> Result<(), ()> {
-        if let Some((i, e)) = self.data.iter_mut().enumerate()
-            .find(|(i, e)| e.is_none()) 
-        {
-            self.data[i] = Some(new);
-            Ok(())
-        } else { Err(()) }
-    }
-}
-impl ALUScheduler {
-
-    /// Return the number of reservations which are ready-for-issue.
-    pub fn num_ready(&self) -> usize {
-        if self.num_pending() == 0 { return 0; }
-        let pending_slots = self.data.iter().filter_map(|s| *s);
-        pending_slots.filter(|res| res.uop.fire()).count()
-    }
-
-    // Find and return a reservation which is ready-for-issue.
-    // This removes the reservation from the scheduler queue.
-    pub fn take_ready(&mut self) -> Option<Reservation> {
-        if self.num_pending() == 0 {
-            return None;
-        }
-
-        let mut iter = self.data.iter_mut();
-        while let Some(slot) = iter.next() {
-            if let Some(entry) = slot {
-                if entry.uop.fire() {
-                    return slot.take();
-                }
-            }
-        }
-        None
-    }
-
-    ///// Return an iterator over all pending reservations.
-    //pub fn iter_pending(&mut self) -> impl Iterator<Item=&mut ALUReservation> {
-    //    self.data.iter_mut().filter_map(|e| e.as_mut())
-    //}
-}
-
-/// An AGU scheduler/reservation station.
-#[derive(Clone, Copy, Debug)]
-pub struct AGUScheduler {
-    pub data: [Option<Reservation>; 28],
-}
-impl AGUScheduler {
-    pub fn new() -> Self {
-        Self { data: [None; 28] }
-    }
-}
-impl Scheduler for AGUScheduler {
-    fn can_alloc(&self) -> bool {
-        self.data.iter().any(|&e| e.is_none()) 
-    }
-    fn can_allocn(&self, n: usize) -> bool {
-        self.data.iter().filter(|&e| e.is_none()).count() >= n
-    }
-    fn num_free(&self) -> usize {
-        self.data.iter().filter(|&e| e.is_none()).count()
-    }
-    fn num_pending(&self) -> usize {
-        self.data.iter().filter(|&e| e.is_some()).count()
-    }
-
-    fn alloc(&mut self, new: Reservation) -> Result<(), ()> {
-        if let Some((i, e)) = self.data.iter_mut().enumerate()
-            .find(|(i, e)| e.is_none()) 
-        {
-            self.data[i] = Some(new);
-            Ok(())
-        } else { Err(()) }
-    }
-}
-
 
 

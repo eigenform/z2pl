@@ -1,12 +1,8 @@
-use std::collections::{ VecDeque };
 
-pub enum PipelinePacket<T> {
-    Ok(T),
-    Err(Exception),
-}
-pub enum Exception {
-    UndefInstr,
-}
+use std::collections::VecDeque;
+
+pub type PipelinePacket<T, E> = Result<T, E>;
+
 
 pub struct Queue<T: Sized + Clone> {
     pub data: VecDeque<T>,

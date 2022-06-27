@@ -9,6 +9,53 @@ use crate::rf::*;
 use crate::dispatch::*;
 use crate::util::*;
 
+pub struct RetireControlUnit;
+impl RetireControlUnit {
+    pub fn cycle(&mut self, 
+        rob: &mut ReorderBuffer, 
+        rat: &mut RegisterAliasTable
+    ) {
+        println!("[RCU] Reorder buffer status:");
+        println!("[RCU]   In-flight:    {}", rob.num_used());
+        println!("[RCU]   Free entries: {}", rob.num_free());
+        println!("[RCU]   Retire ptr:   {}", rob.retire_ptr);
+        println!("[RCU]   Dispatch ptr: {}", rob.dispatch_ptr);
+
+        for i in 0..8 {
+            match rob.pop() {
+                Ok((idx, ent)) => {
+                    println!("[RCU] Retiring entry {} ({}/8): {:08x} {:?}",
+                             idx, i, ent.uop.addr, ent.uop.kind);
+
+                    // Commit architectural effects
+                    for eff in ent.uop.eff {
+                        match eff {
+                            Effect::RegWrite(arn, prn) => {
+                                rat.update(arn, prn);
+                                println!("[RCU] {:?} commit to {:?}", prn, arn);
+                            },
+                            Effect::None => {},
+                            _ => unimplemented!("{:x?}", eff),
+                        }
+                    }
+                },
+                Err(ROBErr::Incomplete) => {
+                    let front = rob.get_front().unwrap();
+                    println!("[RCU] Commit stalled for {:08x} {:?}",
+                             front.uop.addr, front.uop.kind);
+                    break;
+                }
+                Err(ROBErr::Empty) => {
+                    println!("[RCU] Reorder buffer is empty");
+                    break;
+                },
+                Err(e) => unreachable!("{:?}", e),
+            }
+        }
+    }
+}
+
+
 #[derive(Debug)]
 pub enum ROBErr {
     Incomplete,

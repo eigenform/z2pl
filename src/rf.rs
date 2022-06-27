@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use iced_x86::Register;
 
 /// A tag for a physical register.
+#[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Prn(pub usize);
 impl Prn {
@@ -18,37 +19,90 @@ impl std::fmt::Debug for Prn {
     }
 }
 
+/// A tag for an architectural register.
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Arn(pub usize);
+impl std::fmt::Debug for Arn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", Register::from(*self))
+    }
+}
 
+impl From<Arn> for Register {
+    fn from(x: Arn) -> Self {
+        match x.0 {
+            00 => Register::RAX,
+            01 => Register::RBX,
+            02 => Register::RCX,
+            03 => Register::RDX,
+            04 => Register::RSI,
+            05 => Register::RDI,
+            06 => Register::RBP,
+            07 => Register::RSP,
+            08 => Register::R8,
+            09 => Register::R9,
+            10 => Register::R10,
+            11 => Register::R11,
+            12 => Register::R12,
+            13 => Register::R13,
+            14 => Register::R14,
+            15 => Register::R15,
+            _ => unimplemented!(),
+
+        }
+    }
+}
+impl From<Register> for Arn {
+    fn from(x: Register) -> Self {
+        let num = match x {
+            Register::RAX => 00,
+            Register::RBX => 01,
+            Register::RCX => 02,
+            Register::RDX => 03,
+            Register::RSI => 04,
+            Register::RDI => 05,
+            Register::RBP => 06,
+            Register::RSP => 07,
+            Register::R8  => 08,
+            Register::R9  => 09,
+            Register::R10 => 10,
+            Register::R11 => 11,
+            Register::R12 => 12,
+            Register::R13 => 13,
+            Register::R14 => 14,
+            Register::R15 => 15,
+            _ => unimplemented!(),
+        };
+        Self(num)
+    }
+}
 
 pub struct RegisterAliasTable {
-    pub data: HashMap<Register, Prn>
+    //pub data: HashMap<Register, Prn>
+    pub data: [Prn; 16],
 }
 impl RegisterAliasTable {
     pub fn new() -> Self {
-        let mut data = HashMap::new();
-        data.insert(Register::RAX, Prn(0));
-        data.insert(Register::RBX, Prn(0));
-        data.insert(Register::RCX, Prn(0));
-        data.insert(Register::RDX, Prn(0));
-        data.insert(Register::RSI, Prn(0));
-        data.insert(Register::RDI, Prn(0));
-        data.insert(Register::RBP, Prn(0));
-        data.insert(Register::RSP, Prn(0));
-        data.insert(Register::R8,  Prn(0));
-        data.insert(Register::R9,  Prn(0));
-        data.insert(Register::R10, Prn(0));
-        data.insert(Register::R11, Prn(0));
-        data.insert(Register::R12, Prn(0));
-        data.insert(Register::R13, Prn(0));
-        data.insert(Register::R14, Prn(0));
-        data.insert(Register::R15, Prn(0));
+        let mut data: [Prn; 16] = [Prn(0); 16];
         Self { data }
     }
-    pub fn resolve(&self, r: &Register) -> Prn {
-        *self.data.get(r).unwrap()
+    pub fn print(&self, prf: &PhysicalRegisterFile) {
+        println!("[RAT] Register Alias Table state:");
+        for (arn, prn) in self.data.iter().enumerate() {
+            let areg = format!("{:?}", Register::from(Arn(arn)));
+            println!("[RAT]   {:3} => {:03} => {:016x}", 
+                     areg, prn.0, prf.read(*prn));
+        }
     }
-    pub fn bind(&mut self, r: Register, prn: Prn) {
-        self.data.insert(r, prn).unwrap();
+    pub fn resolve(&self, r: Register) -> Prn {
+        let idx = Arn::from(r).0;
+        self.data[idx]
+    }
+
+    pub fn update(&mut self, r: Register, prn: Prn) {
+        let idx = Arn::from(r).0;
+        self.data[idx] = prn;
     }
 }
 

@@ -26,7 +26,7 @@ pub enum MacroOp {
     JmpI(usize),
 }
 
-/// Convert a decoded instruction into one [or more] macro-ops.
+/// Convert a decoded instruction into one [or more?] macro-ops.
 pub fn get_macro_ops(dec: &DecodedInst) -> MacroOp {
     println!("[IDU] Found macro-op {:08x}: {:?} {:02x?}", dec.addr, 
         dec.inst.code(), &dec.bytes[..dec.inst.len()]);
@@ -162,11 +162,12 @@ impl Uop {
         }
     }
 
-    /// Return the execution latency associated with this micro-op
     pub fn latency(&self) -> usize {
         match self.kind {
             UopKind::Alu(ALUOp::Nop) => 1,
-            _ => unimplemented!(),
+            UopKind::Alu(ALUOp::Add) => 1,
+            UopKind::Alu(ALUOp::Brn) => 1,
+            _ => unimplemented!("{:?}", self.kind),
         }
     }
 
@@ -181,6 +182,15 @@ impl Uop {
     pub fn fire(&self) -> bool {
         match self.kind {
             UopKind::Alu(ALUOp::Nop) => true,
+            UopKind::Alu(ALUOp::Brn) => true,
+            UopKind::Alu(alu_op) => {
+                if self.iter_prn_deps().count() == 0 {
+                    true
+                } else {
+                    unimplemented!("{:?}", self.arg)
+                }
+            },
+
             _ => unimplemented!("Can't fire {:?}", self.kind),
         }
     }
